@@ -1,5 +1,5 @@
-mutealsa
-mutealsa_debug
-mutealsa_static
+sleepmute
+sleepmute_debug
+sleepmute_static
 libalsa/
 musl/
