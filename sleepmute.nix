@@ -2,7 +2,7 @@
 let
   sleepmute-bin = pkgs.fetchurl {
     url = "https://github.com/FinlayTheBerry/sleepmute/releases/download/v0.2.0/sleepmute_static";
-    hash = "sha256-Y2zO6YO2PUE3bm/m6lV7hpJGBQadB3USV5YdJPCSu1E=";
+    hash = "sha256-gJBjIIzzz3RN0Z1UWAR6ZxqSiPHg8EESw0ZDBhiPW1Q=";
     executable = true;
   };
 in
