@@ -1,20 +1,58 @@
 #define _GNU_SOURCE
 #include <alsa/asoundlib.h>
-
-const char *state_path = "/run/sleepmute-muted-60eaa8c5-be35-4e04-a9fa-4616caadb819";
-
 #include <sys/mman.h>
-void bootstrap_alsa() {
-    const char *mini_alsa_conf = "ctl.hw { @args [ CARD ] @args.CARD { type string } type hw card $CARD }";
+
+#include <stdio.h>
+#include <string.h>
+#include <unistd.h>
+#include <errno.h>
+#include <stdlib.h>
+#include <sys/stat.h>
+
+const char *state_path = "/run/sleepmute-state-60eaa8c5-be35-4e04-a9fa-4616caadb819";
+
+int bootstrap_alsa()
+{
+    const char mini_alsa_conf[] = "ctl.hw { @args [ CARD ] @args.CARD { type string } type hw card $CARD }";
+    size_t mini_alsa_conf_len = sizeof(mini_alsa_conf) - 1;
+
     int fd = memfd_create("mini_alsa_conf", 0);
-    write(fd, mini_alsa_conf, strlen(mini_alsa_conf));
-    char fd_path[25];
-    sprintf(fd_path, "/proc/self/fd/%d", fd);
-    setenv("ALSA_CONFIG_PATH", fd_path, 1);
+    if (fd == -1)
+    {
+        fprintf(stderr, "error - memfd_create - %s\n", strerror(errno));
+        fflush(stderr);
+        return 1;
+    }
+
+    if (write(fd, mini_alsa_conf, mini_alsa_conf_len) != (ssize_t)mini_alsa_conf_len)
+    {
+        fprintf(stderr, "error - write - %s\n", strerror(errno));
+        fflush(stderr);
+        close(fd);
+        return 1;
+    }
+
+    char fd_path[25]; // Just long enough for "/proc/self/fd/4294967296\0"
+    snprintf(fd_path, sizeof(fd_path), "/proc/self/fd/%d", fd);
+
+    if (setenv("ALSA_CONFIG_PATH", fd_path, 1) != 0)
+    {
+        fprintf(stderr, "error - setenv - %s\n", strerror(errno));
+        fflush(stderr);
+        close(fd);
+        return 1;
+    }
+
+    return 0;
 }
 
-void cleanup(char **card_name, char **elem_id_str, snd_mixer_t **mixer)
+void cleanup(int *fd, char **card_name, char **elem_id_str, snd_mixer_t **mixer)
 {
+    if (*fd != -1)
+    {
+        close(*fd);
+        *fd = -1;
+    }
     if (*card_name != NULL)
     {
         free(*card_name);
@@ -34,9 +72,15 @@ void cleanup(char **card_name, char **elem_id_str, snd_mixer_t **mixer)
 
 int main(int argc, char **argv)
 {
-    bootstrap_alsa();
+    // TODO proofread main
+    
+    int error_code = bootstrap_alsa();
+    if (error_code != 0)
+    {
+        return error_code;
+    }
 
-    int error_code = 0;
+    int fd = -1;
     char *card_name = NULL;
     char *elem_id_str = NULL;
     snd_mixer_t *mixer = NULL;
@@ -54,15 +98,22 @@ int main(int argc, char **argv)
     {
         fprintf(stderr, "Usage: sleepmute (pre|post)\n");
         fflush(stderr);
-        cleanup(&card_name, &elem_id_str, &mixer);
-        return 1;
+        cleanup(&fd, &card_name, &elem_id_str, &mixer);
+        return 2;
     }
 
-    if (!restore)
+    if (restore)
     {
-        FILE *f = fopen(state_path, "w");
-        if (f) {
-            fclose(f);
+    }
+    else
+    {
+        int fd = open(state_path, O_CREAT | O_TRUNC | O_WRONLY, 0600);
+        if (fd == -1)
+        {
+            fprintf(stderr, "error - open - %s\n", strerror(errno));
+            fflush(stderr);
+            cleanup(&fd, &card_name, &elem_id_str, &mixer);
+            return 1;
         }
     }
 
@@ -73,7 +124,7 @@ int main(int argc, char **argv)
         {
             fprintf(stderr, "error - snd_card_next - %s\n", snd_strerror(error_code));
             fflush(stderr);
-            cleanup(&card_name, &elem_id_str, &mixer);
+            cleanup(&fd, &card_name, &elem_id_str, &mixer);
             return 1;
         }
         if (card_id < 0)
@@ -84,9 +135,9 @@ int main(int argc, char **argv)
         card_name = (char *)malloc(snprintf(NULL, 0, "hw:%d", card_id) + 1);
         if (card_name == NULL)
         {
-            fprintf(stderr, "error - malloc - out of memory\n");
+            fprintf(stderr, "error - malloc - %s\n", strerror(errno));
             fflush(stderr);
-            cleanup(&card_name, &elem_id_str, &mixer);
+            cleanup(&fd, &card_name, &elem_id_str, &mixer);
             return 1;
         }
         sprintf(card_name, "hw:%d", card_id);
@@ -95,7 +146,7 @@ int main(int argc, char **argv)
         {
             fprintf(stderr, "error - snd_card_get_longname - %s\n", snd_strerror(error_code));
             fflush(stderr);
-            cleanup(&card_name, &elem_id_str, &mixer);
+            cleanup(&fd, &card_name, &elem_id_str, &mixer);
             return 1;
         }
 
@@ -103,18 +154,17 @@ int main(int argc, char **argv)
         {
             fprintf(stderr, "error - snd_mixer_open - %s\n", snd_strerror(error_code));
             fflush(stderr);
-            cleanup(&card_name, &elem_id_str, &mixer);
+            cleanup(&fd, &card_name, &elem_id_str, &mixer);
             return 1;
         }
 
-        
         char card_id_str[14]; // Just long enough for "hw:4294967296\0"
         sprintf(card_id_str, "hw:%d", card_id);
         if ((error_code = snd_mixer_attach(mixer, card_id_str)) != 0)
         {
             fprintf(stderr, "error - snd_mixer_attach - %s\n", snd_strerror(error_code));
             fflush(stderr);
-            cleanup(&card_name, &elem_id_str, &mixer);
+            cleanup(&fd, &card_name, &elem_id_str, &mixer);
             return 1;
         }
 
@@ -122,7 +172,7 @@ int main(int argc, char **argv)
         {
             fprintf(stderr, "error - snd_mixer_selem_register - %s\n", snd_strerror(error_code));
             fflush(stderr);
-            cleanup(&card_name, &elem_id_str, &mixer);
+            cleanup(&fd, &card_name, &elem_id_str, &mixer);
             return 1;
         }
 
@@ -130,7 +180,7 @@ int main(int argc, char **argv)
         {
             fprintf(stderr, "error - snd_mixer_load - %s\n", snd_strerror(error_code));
             fflush(stderr);
-            cleanup(&card_name, &elem_id_str, &mixer);
+            cleanup(&fd, &card_name, &elem_id_str, &mixer);
             return 1;
         }
 
@@ -154,9 +204,9 @@ int main(int argc, char **argv)
                 elem_id_str = malloc(snprintf(NULL, 0, "%d,%s,%d,%s,%d", card_id, card_name, elem_id, elem_name, i) + 1);
                 if (elem_id_str == NULL)
                 {
-                    fprintf(stderr, "error - malloc - out of memory\n");
+                    fprintf(stderr, "error - malloc - %s\n", strerror(errno));
                     fflush(stderr);
-                    cleanup(&card_name, &elem_id_str, &mixer);
+                    cleanup(&fd, &card_name, &elem_id_str, &mixer);
                     return 1;
                 }
                 sprintf(elem_id_str, "%d,%s,%d,%s,%d", card_id, card_name, elem_id, elem_name, i);
@@ -164,7 +214,8 @@ int main(int argc, char **argv)
                 if (restore)
                 {
                     int muteState = 1;
-                    FILE *f = fopen(state_path, "r");
+                    // TODO fix this mess
+                    /*FILE *f = fopen(state_path, "r");
                     if (f)
                     {
                         char line[1024];
@@ -178,13 +229,13 @@ int main(int argc, char **argv)
                             }
                         }
                         fclose(f);
-                    }
+                    }*/
 
                     if ((error_code = snd_mixer_selem_set_playback_switch(elem, i, muteState)) != 0)
                     {
                         fprintf(stderr, "error - snd_mixer_selem_set_playback_switch - %s\n", snd_strerror(error_code));
                         fflush(stderr);
-                        cleanup(&card_name, &elem_id_str, &mixer);
+                        cleanup(&fd, &card_name, &elem_id_str, &mixer);
                         return 1;
                     }
                 }
@@ -195,17 +246,25 @@ int main(int argc, char **argv)
                     {
                         fprintf(stderr, "error - snd_mixer_selem_get_playback_switch - %s\n", snd_strerror(error_code));
                         fflush(stderr);
-                        cleanup(&card_name, &elem_id_str, &mixer);
+                        cleanup(&fd, &card_name, &elem_id_str, &mixer);
                         return 1;
                     }
 
                     if (value == 0)
                     {
-                        FILE *f = fopen(state_path, "a");
-                        if (f)
+                        if (write(fd, elem_id_str, strlen(elem_id_str)) != (ssize_t)strlen(elem_id_str))
                         {
-                            fprintf(f, "%s\n", elem_id_str);
-                            fclose(f);
+                            fprintf(stderr, "error - write - %s\n", strerror(errno));
+                            fflush(stderr);
+                            cleanup(&fd, &card_name, &elem_id_str, &mixer);
+                            return 1;
+                        }
+                        if (write(fd, "\n", 1) != 1)
+                        {
+                            fprintf(stderr, "error - write - %s\n", strerror(errno));
+                            fflush(stderr);
+                            cleanup(&fd, &card_name, &elem_id_str, &mixer);
+                            return 1;
                         }
                     }
 
@@ -213,13 +272,20 @@ int main(int argc, char **argv)
                     {
                         fprintf(stderr, "error - snd_mixer_selem_set_playback_switch - %s\n", snd_strerror(error_code));
                         fflush(stderr);
-                        cleanup(&card_name, &elem_id_str, &mixer);
+                        cleanup(&fd, &card_name, &elem_id_str, &mixer);
                         return 1;
                     }
                 }
             }
         }
-        cleanup(&card_name, &elem_id_str, &mixer);
+
+        // TODO Add error checking
+        free(card_name);
+        card_name = NULL;
+        free(elem_id_str);
+        elem_id_str = NULL;
+        snd_mixer_close(mixer);
+        mixer = NULL;
     }
     return 0;
 }
